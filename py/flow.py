@@ -104,26 +104,6 @@ def cmd_error():
 def cmd_version():
 	control_socket.send_string(VERSION_STRING)
 
-def remove_mapping_old(port_in, port_out):
-	r_success = False
-	for key, val in mapping.items():
-		if val[0] == port_in:
-			for output in val[1]:
-				if output[0] == port_out:
-					# Close because this one is the bind
-					output[1].close()
-					val[1].remove(output)
-					r_success = True
-			if len(val[1]) == 0:
-				# Disconnect because this one is the connect
-				key.close()
-				# key.disconnect("tcp://"+HOSTNAME+":"+str(port_in))
-				mapping_ports_list.remove(port_in)
-				del mapping[key]
-			if r_success:
-				print("attempted to remove socket connection",mapping)
-				break
-
 def remove_mapping(port_in, port_out):
 	# get input combo
 	input_socket = port_map[port_in][0]
