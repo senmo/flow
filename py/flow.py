@@ -156,7 +156,6 @@ def remove_mapping(port_in, port_out):
 
 	return True
 
-
 def add_mapping(port_in, port_out, in_mode, out_mode, topics, prefix):
 	
 	# If we have not already created an output socket for this output create one now to ensure we can bind succesfully
@@ -178,23 +177,36 @@ def add_mapping(port_in, port_out, in_mode, out_mode, topics, prefix):
 
 	# Check if port exists in map and add if needed
 	if port_in not in port_map:
+		# create a new list for mapping items where the first element is in_mode
+		port_map[port_in] = [in_mode]
 		if in_mode == 'pull':
 			socket_in = context.socket(zmq.PULL)
 		elif in_mode == 'sub':
-			socket_in = context.socket(zmq.SUB)
-			# Do all the topics
-			for topic in topics:
-				socket_in.setsockopt_string(zmq.SUBSCRIBE, topic)
-			# if there were no topics forward all topics
-			if len(topics) == 0:
-				socket_in.setsockopt_string(zmq.SUBSCRIBE, '')
+			socket_in = create_socket_from_topics(topics)
 		else:
 			# Default case
 			socket_in = context.socket(zmq.PULL)
 		
-		socket_in.connect("tcp://"+HOSTNAME+":"+str(port_in))
-		port_map[port_in] = (socket_in, in_mode, topics)
-		poller.register(socket_in, zmq.POLLIN)
+		setup_input_socket(HOSTNAME,port_in,topics,socket_in)
+
+	else:
+		# compare modes
+		# zeroth index contains the mode
+		if port_map[port_in][0] == in_mode:
+			# if modes match and the mode is sub then do stuff
+			# If the mode is anything else do nothing
+			if in_mode == 'sub':
+				# check for matching topics --> tuple format is (socket, [topics])
+				for socket_and_topics in port_map[port_in][1:]
+					# if the topics are not the same
+					if socket_and_topics[1] != topics:
+						new_socket = create_socket_from_topics(topics)
+						setup_input_socket(HOSTNAME,port_in,topics,new_socket)
+		else:
+			# do some error handling
+			print("modes do not match")
+			return False
+
 
 	# Get socket from port
 	input_socket = port_map[port_in][0]
@@ -208,6 +220,22 @@ def add_mapping(port_in, port_out, in_mode, out_mode, topics, prefix):
 		input_map[input_socket].append(port_out)
 
 	return True
+
+def setup_input_socket(hostname, port_in, topics, socket):
+	socket_in.connect("tcp://"+hostname+":"+str(port_in))
+	port_map[port_in].append((socket, topics))
+	poller.register(socket, zmq.POLLIN)
+
+def create_socket_from_topics(topics):
+	socket = context.socket(zmq.SUB)
+	# Do all the topics
+	for topic in topics:
+		socket.setsockopt_string(zmq.SUBSCRIBE, topic)
+	# if there were no topics forward all topics
+	if len(topics) == 0:
+		socket.setsockopt_string(zmq.SUBSCRIBE, '')
+
+	return socket
 
 def send_string_to_sockets(input_socket, string):
 	# get ports to send to
@@ -225,7 +253,7 @@ def send_string_to_sockets(input_socket, string):
 			except:
 				if output_map[port][1] == 'push':
 					print("No consumer active @" + port +" "+str(time.time()))
-					
+
 while True:
 	socks = dict(poller.poll(100))
 
