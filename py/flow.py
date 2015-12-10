@@ -8,6 +8,7 @@ CMD_REF = """
 Usage:
   > map (sub|pull) <port_in> (push|pub) <port_out> [--topic|-t (<topics>)...] [--prefix|-p <prefix>]
   > unmap <port_in> <port_out> [--topic|-t (<topics>)...] [--all-topics]
+  > unmap group (input|output) <port>
   > print
   > help
   > version
@@ -68,6 +69,8 @@ def parse_cmd_arr(cmd_dict):
 		else:
 			if cmd_dict["--all-topics"]:
 				cmd_unmap_all_topics(port_tuple)
+			elif cmd_dict['input']:
+				cmd_unmap_input(cmd_dict['<port>'])
 			else:
 				cmd_unmap(port_tuple,cmd_dict['<topics>'])
 	elif cmd_dict['print']:
@@ -105,6 +108,14 @@ def cmd_unmap_all_topics(port_tuple):
 		output_string += "failed to unmap all topics"
 	control_socket.send_string(output_string)
 
+def cmd_unmap_input(port):
+	output_string = ""
+	if remove_mapping_by_input(port):
+		output_string += ("unmapped input port: "+str(port))
+	else:
+		output_string += "failed to unmap input port: "+str(port)
+	control_socket.send_string(output_string)
+
 def cmd_print():
 	control_socket.send_string(pprint.pformat((port_map,input_map,output_map), compact=True))
 
@@ -132,20 +143,7 @@ def remove_mapping(port_in, port_out, topics=[]):
 
 	safe_del_port_out(port_out,input_socket=input_socket)
 
-	# check length of input map list
-	# if zero we know the last mapping of this input has been removed and we should remove the whole thing
-	if len(input_map[input_socket]) == 0:
-		# Must unregister to avoid high cpu usage
-		poller.unregister(input_socket)
-		input_socket.close()
-		del input_map[input_socket]
-		
-	if input_socket not in input_map:
-		port_map[port_in].remove((input_socket,topics))
-
-	# if the port_map entry for the port is one there must only be the mode remaining and we may delete
-	if len(port_map[port_in]) == 1:
-		del port_map[port_in]
+	safe_del_port_in(port_in,input_socket, topics)
 
 	return True
 
@@ -164,6 +162,35 @@ def remove_mapping_for_all_topics(port_in, port_out):
 		return True
 	else:
 		return False
+
+def remove_mapping_by_input(port_in):
+	# we use a slice up here which intrinsically copies so we do not have to worry about creating a new list
+	for s, t in port_map[port_in][1:]:
+		# need to make a new list here because safe_del edits the base list as it runs
+		outputs = list(input_map[s])
+		for output_port in outputs:
+			safe_del_port_out(output_port, s)
+		
+		safe_del_port_in(port_in,s,t)
+
+	return True
+
+def safe_del_port_in(port_in, input_socket, topics):
+
+	# check length of input map list
+	# if zero we know the last mapping of this input has been removed and we should remove the whole thing
+	if len(input_map[input_socket]) == 0:
+		# Must unregister to avoid high cpu usage
+		poller.unregister(input_socket)
+		input_socket.close()
+		del input_map[input_socket]
+		
+	if input_socket not in input_map:
+		port_map[port_in].remove((input_socket,topics))
+
+	# if the port_map entry for the port is one there must only be the mode remaining and we may delete
+	if len(port_map[port_in]) == 1:
+		del port_map[port_in]
 
 def safe_del_port_out(port_out, input_socket=None):
 	# remove from input output map
