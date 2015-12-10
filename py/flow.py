@@ -7,14 +7,15 @@ VERSION_STRING = "senmo py-router 0.0.1"
 CMD_REF = """
 Usage:
   > map (sub|pull) <port_in> (push|pub) <port_out> [--topic|-t (<topics>)...] [--prefix|-p <prefix>]
-  > unmap <port_in> <port_out>
+  > unmap <port_in> <port_out> [--topic|-t (<topics>)...] [--all-topics]
   > print
   > help
   > version
 
 Options:
-	-t (<topic>)..., --topic (<topic>)...  list SUB topics
+	-t (<topic>)..., --topic (<topic>)...  list SUB topics to act on
 	-p <prefix>, --prefix <prefix>         PUB topic to prefix each message
+	--all-topics                           unmap all topics for the port pair
 """
 
 CMD_REF = VERSION_STRING + CMD_REF
@@ -65,7 +66,10 @@ def parse_cmd_arr(cmd_dict):
 			cmd_map(port_tuple, in_mode, out_mode, cmd_dict['<topics>'], prefix)
 		# if unmapping tuples alone are fine
 		else:
-			cmd_unmap(port_tuple)
+			if cmd_dict["--all-topics"]:
+				cmd_unmap_all_topics(port_tuple)
+			else:
+				cmd_unmap(port_tuple,cmd_dict['<topics>'])
 	elif cmd_dict['print']:
 		cmd_print()
 	elif cmd_dict['help']:
@@ -85,11 +89,20 @@ def cmd_map(port_tuple, in_mode, out_mode, topics, prefix):
 
 	control_socket.send_string(output_string)
 
-def cmd_unmap(port_tuple):
+def cmd_unmap(port_tuple, topics):
 	output_string = ""
-	# At some point we can remove these loops
-	remove_mapping(port_tuple[0], port_tuple[1])
-	output_string += ("unmapped " + str(port_tuple[0]) +":"+str(port_tuple[1]) + ". ")
+	if remove_mapping(port_tuple[0], port_tuple[1], topics=topics):
+		output_string += ("unmapped " + str(port_tuple[0]) +":"+str(port_tuple[1]) + ". ")
+	else:
+		output_string += "failed to unmap"
+	control_socket.send_string(output_string)
+
+def cmd_unmap_all_topics(port_tuple):
+	output_string = ""
+	if remove_mapping_for_all_topics(port_tuple[0], port_tuple[1]):
+		output_string += ("unmapped all associated topics")
+	else:
+		output_string += "failed to unmap all topics"
 	control_socket.send_string(output_string)
 
 def cmd_print():
@@ -104,13 +117,20 @@ def cmd_error():
 def cmd_version():
 	control_socket.send_string(VERSION_STRING)
 
-def remove_mapping(port_in, port_out):
+def remove_mapping(port_in, port_out, topics=[]):
 	# get input combo
-	input_socket = port_map[port_in][0]
+	try:
+		input_mode = port_map[port_in][0]
+	except KeyError:
+		return False
+	if input_mode == 'sub':
+		input_socket = get_socket_with_topics(port_in, topics)
+		if input_socket == None:
+			return False
+	else:
+		input_socket = port_map[port_in][1][0]
 
-	# remove from input output map
-	if port_out in input_map[input_socket]:
-		input_map[input_socket].remove(port_out)
+	safe_del_port_out(port_out,input_socket=input_socket)
 
 	# check length of input map list
 	# if zero we know the last mapping of this input has been removed and we should remove the whole thing
@@ -119,8 +139,37 @@ def remove_mapping(port_in, port_out):
 		poller.unregister(input_socket)
 		input_socket.close()
 		del input_map[input_socket]
+		
+	if input_socket not in input_map:
+		port_map[port_in].remove((input_socket,topics))
+
+	# if the port_map entry for the port is one there must only be the mode remaining and we may delete
+	if len(port_map[port_in]) == 1:
 		del port_map[port_in]
 
+	return True
+
+def remove_mapping_for_all_topics(port_in, port_out):
+	try:
+		input_mode = port_map[port_in][0]
+	except KeyError:
+		return False
+	if input_mode == 'sub':
+		# get all possible topics
+		print("starting to work on topics")
+		input_topics = [t for (s, t) in port_map[port_in][1:]]
+		for topic in input_topics:
+			print("working on topic: "+str(topic))
+			remove_mapping(port_in, port_out, topics=topic)
+		return True
+	else:
+		return False
+
+def safe_del_port_out(port_out, input_socket=None):
+	# remove from input output map
+	if input_socket:
+		if port_out in input_map[input_socket]:
+			input_map[input_socket].remove(port_out)
 	# now scan the remainder of the input map to find any other uses of the output socket
 	found = False
 	for key, val in input_map.items():
@@ -134,10 +183,7 @@ def remove_mapping(port_in, port_out):
 		output_map[port_out][0].close()
 		del output_map[port_out]
 
-	return True
-
 def add_mapping(port_in, port_out, in_mode, out_mode, topics, prefix):
-	
 	# If we have not already created an output socket for this output create one now to ensure we can bind succesfully
 	if port_out not in output_map and port_out != 'sinkhole':
 		if out_mode == 'pub':
@@ -168,7 +214,6 @@ def add_mapping(port_in, port_out, in_mode, out_mode, topics, prefix):
 			socket_in = context.socket(zmq.PULL)
 		
 		setup_input_socket(HOSTNAME,port_in,topics,socket_in)
-
 	else:
 		# compare modes
 		# zeroth index contains the mode
@@ -177,19 +222,22 @@ def add_mapping(port_in, port_out, in_mode, out_mode, topics, prefix):
 			# If the mode is anything else do nothing
 			if in_mode == 'sub':
 				# check for matching topics --> tuple format is (socket, [topics])
-				for socket_and_topics in port_map[port_in][1:]
-					# if the topics are not the same
-					if socket_and_topics[1] != topics:
-						new_socket = create_socket_from_topics(topics)
-						setup_input_socket(HOSTNAME,port_in,topics,new_socket)
+				# see if we can get a socket with the matching topics
+				# if we can it already exists and thus we should not add
+				if get_socket_with_topics(port_in,topics) == None:
+					new_socket = create_socket_from_topics(topics)
+					setup_input_socket(HOSTNAME,port_in,topics,new_socket)
+
 		else:
 			# do some error handling
 			print("modes do not match")
+			# remove output mapping
+			safe_del_port_out(port_out)
 			return False
 
 
-	# Get socket from port
-	input_socket = port_map[port_in][0]
+	# Get socket from port (this function should never return none within this block as we should have just defined a matching socket. If we fail below this line something has gone very wrong. This function may also throw an error...if this happens something has also gone very wrong)
+	input_socket = get_socket_with_topics(port_in, topics)
 
 	# Check and setup input map
 	if input_socket not in input_map:
@@ -202,9 +250,20 @@ def add_mapping(port_in, port_out, in_mode, out_mode, topics, prefix):
 	return True
 
 def setup_input_socket(hostname, port_in, topics, socket):
-	socket_in.connect("tcp://"+hostname+":"+str(port_in))
+	socket.connect("tcp://"+hostname+":"+str(port_in))
 	port_map[port_in].append((socket, topics))
 	poller.register(socket, zmq.POLLIN)
+
+def get_socket_with_topics(port_in, topics):
+	socket = [s for (s,t) in port_map[port_in][1:] if t == topics]
+	if len(socket) > 1:
+		print("dumping maps")
+		print(pprint.pformat((port_map,input_map,output_map), compact=True))
+		raise Exception("port_map is invalid: there are more than one input port with the same set of topics")
+	elif len(socket) == 0:
+		return None
+	else:
+		return socket[0]
 
 def create_socket_from_topics(topics):
 	socket = context.socket(zmq.SUB)
