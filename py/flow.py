@@ -71,6 +71,8 @@ def parse_cmd_arr(cmd_dict):
 				cmd_unmap_all_topics(port_tuple)
 			elif cmd_dict['input']:
 				cmd_unmap_input(cmd_dict['<port>'])
+			elif cmd_dict['output']:
+				cmd_unmap_output(cmd_dict['<port>'])
 			else:
 				cmd_unmap(port_tuple,cmd_dict['<topics>'])
 	elif cmd_dict['print']:
@@ -116,6 +118,14 @@ def cmd_unmap_input(port):
 		output_string += "failed to unmap input port: "+str(port)
 	control_socket.send_string(output_string)
 
+def cmd_unmap_output(port):
+	output_string = ""
+	if remove_mapping_by_output(port):
+		output_string += ("unmapped output port: "+str(port))
+	else:
+		output_string += "failed to unmap output port: "+str(port)
+	control_socket.send_string(output_string)
+
 def cmd_print():
 	control_socket.send_string(pprint.pformat((port_map,input_map,output_map), compact=True))
 
@@ -142,6 +152,8 @@ def remove_mapping(port_in, port_out, topics=[]):
 		input_socket = port_map[port_in][1][0]
 
 	safe_del_port_out(port_out,input_socket=input_socket)
+
+	cleanup_input_socket(input_socket)
 
 	safe_del_port_in(port_in,input_socket, topics)
 
@@ -171,12 +183,39 @@ def remove_mapping_by_input(port_in):
 		for output_port in outputs:
 			safe_del_port_out(output_port, s)
 		
+		cleanup_input_socket(s)
 		safe_del_port_in(port_in,s,t)
 
 	return True
 
-def safe_del_port_in(port_in, input_socket, topics):
+def remove_mapping_by_output(port_out):
+	# THIS METHOD IS NOT VERY EFFICIENT
+	# IT REQUIRES A LARGE AMOUNT OF UNAVOIDABLE ITERATION
+	# AND CANNOT BE IMPROVED WITHOUT DATA STRUCTURE CHANGES
+	# THUS IT IS RECCOMENDED TO PREFER REMOVE_MAPPING_BY_INPUT
+	# WHENEVER POSSIBLE
+	# input mappings containing the port
+	input_sockets = [socket for socket, arr in input_map.items() if port_out in arr]
 
+	for input_socket in input_sockets:
+		safe_del_port_out(port_out, input_socket=input_socket)
+		cleanup_input_socket(input_socket)
+		
+		# we have already cleaned up the input map so now just check if the socket is not in the input map before we attempt to clear the port_map
+		if input_socket not in input_map:
+			ports_using = []
+
+			# iterate through to find the usages of input socket in the port map
+			for port, arr in port_map.items():
+				for socket, topics in arr[1:]:
+					if input_socket == socket:
+						ports_using.append((port,topics))
+			for port, topics in ports_using:
+				safe_del_port_in(port,input_socket,topics)
+
+	return True
+
+def cleanup_input_socket(input_socket):
 	# check length of input map list
 	# if zero we know the last mapping of this input has been removed and we should remove the whole thing
 	if len(input_map[input_socket]) == 0:
@@ -184,6 +223,8 @@ def safe_del_port_in(port_in, input_socket, topics):
 		poller.unregister(input_socket)
 		input_socket.close()
 		del input_map[input_socket]
+
+def safe_del_port_in(port_in, input_socket, topics):
 		
 	if input_socket not in input_map:
 		port_map[port_in].remove((input_socket,topics))
